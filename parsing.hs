@@ -1,5 +1,6 @@
 module Main where
 import IO hiding (try)
+import Data.IORef
 import Text.ParserCombinators.Parsec hiding (spaces)
 import Monad
 import System.Environment
@@ -128,7 +129,7 @@ unwordsList = unwords . map showVal
 
 -- Evaluation
 
-eval :: LispVal -> ThrowsError LispVal
+eval :: LispVal -> IOThrowsError LispVal
 eval val@(LString _)                  = return val
 eval val@(LNumber _)                  = return val
 eval val@(LBool _)                    = return val
@@ -140,7 +141,7 @@ eval (LList [LAtom "if", cond, t, e]) = do result <- eval cond
                                              x -> throwError $ 
                                                   TypeMismatch "boolean" x
 eval (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
-eval (LList (LAtom func : args))      = mapM eval args >>= apply func
+eval (LList (LAtom func : args))      = mapM eval args >>= liftThrows . apply func
 eval badForm                          = throwError $ UnrecognizedSpecialForm badForm
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
@@ -320,13 +321,24 @@ instance Show LispError where
            "got " ++ show actual)
     -- TODO: Why no definition for Default?
 
+-- State
+
+type Env = IORef [(String, IORef LispVal)]
+
+type IOThrowsError = ErrorT LispError IO
+
+liftThrows :: ThrowsError a -> IOThrowsError a
+liftThrows (Left err)  = throwError err
+liftThrows (Right val) = return val
+
 main :: IO ()
 main = do putStr "Lisp > "
           hFlush stdout
           line <- getLine
           case line of
             "quit" -> return ()
-            otherwise -> do case (readExpr line) >>= eval of
+            otherwise -> do result <- runErrorT $ (readExpr line) >>= eval
+                            case result of
                               Left err  -> print err
                               Right val -> print val
                             main
