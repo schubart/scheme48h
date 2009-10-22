@@ -18,7 +18,7 @@ data LispVal = LAtom String
              | LNumber Integer
              | LString String
              | LBool Bool
-               deriving Show
+instance Show LispVal where show = showVal
 
 parseAtom = do first <- symbol <|> letter
                rest  <- many $ letter <|> symbol <|> digit
@@ -109,12 +109,88 @@ parseExpr = parseAtom
 -- TODO: Exercises 2.*
 
 -- "lisp" only seems to be used for error messages.
-readExpr :: String -> String
+readExpr :: String -> LispVal
 readExpr input = case parse parseExpr "lisp" input of
-                   Left  err -> "No match: " ++ show err
-                   Right val -> show val
+                   Left  err -> LString $ "No match: " ++ show err
+                   Right val -> val
+
+showVal :: LispVal -> String
+showVal (LAtom name)            = name
+showVal (LList items)           = "(" ++ unwordsList items ++ ")"
+showVal (LDottetList init last) = "(" 
+                                  ++ unwordsList init 
+                                  ++ " . " 
+                                  ++ showVal last 
+                                  ++ ")"
+showVal (LNumber value)         = show value
+showVal (LString value)         = "\"" ++ value ++ "\""
+showVal (LBool True)            = "#t"
+showVal (LBool False)           = "#f"
+
+unwordsList :: [LispVal] -> String
+unwordsList = unwords . map showVal
+
+-- Evaluation
+
+eval :: LispVal -> LispVal
+eval val@(LString _)              = val
+eval val@(LNumber _)              = val
+eval val@(LBool _)                = val
+eval (LList [LAtom "quote", val]) = val
+eval (LList (LAtom func : args))  = apply func $ map eval args
+
+err object message = error $ (show object) ++ ": " ++ message
+
+apply :: String -> [LispVal] -> LispVal
+apply func args = maybe (err func "Not defined") ($ args) $ lookup func primitives
+
+primitives ::[(String, [LispVal] -> LispVal)]
+primitives = [("+",         numericBinop (+)),
+              ("-",         numericBinop (-)),
+              ("*",         numericBinop (*)),
+              ("/",         numericBinop div),
+              ("mod",       numericBinop mod),
+              ("quotient",  numericBinop quot),
+              ("remainder", numericBinop rem),
+              -- Exercise 3.1
+              ("boolean?", booleanp),
+              ("symbol?",  symbolp),
+              ("string?",  stringp),
+              ("number?",  numberp),
+              -- Exercise 3.3
+              ("string->symbol", string2symbol),
+              ("symbol->string", symbol2string)
+             ]
+
+numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
+numericBinop op args = LNumber $ foldl1 op $ map unpackNum args
+
+unpackNum :: LispVal -> Integer
+unpackNum (LNumber n) = n
+{- Exercise 3.2
+unpackNum (LString n) = let parsed = reads n in
+                        if null parsed
+                        then 0
+                        else fst $ head $ parsed
+unpackNum (LList [n]) = unpackNum n
+-}
+unpackNum x           = err x "Not a number"
+
+-- Exercise solutions throw exception (non-exhaustive pattern) when calling
+-- these unary functions with multiple args. This here returns false.
+booleanp [(LBool _)] = LBool True
+booleanp _           = LBool False
+symbolp [(LAtom _)] = LBool True
+symbolp _           = LBool False
+stringp [(LString _)] = LBool True
+stringp _             = LBool False
+numberp [(LNumber _)] = LBool True
+numberp _             = LBool False
+string2symbol [(LString val)] = LAtom val
+string2symbol x = err x "Not a string"
+symbol2string [(LAtom val)] = LString val
+symbol2string x = err x "Not a symbol"
+
 
 main :: IO ()
-main = do
-  args <- getArgs
-  putStrLn $ readExpr $ head args
+main = do getArgs >>= putStrLn . show . eval . readExpr . head
