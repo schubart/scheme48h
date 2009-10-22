@@ -15,7 +15,7 @@ spaces = skipMany1 space
 -- Decided to prefix ctors with "L" to make it less confusing...
 data LispVal = LAtom String
              | LList [LispVal]
-             | LDottetList [LispVal] LispVal
+             | LDottedList [LispVal] LispVal
              | LNumber Integer
              | LString String
              | LBool Bool
@@ -34,7 +34,7 @@ parseList = do items <- sepBy parseExpr spaces
 
 parseDottedList = do init <- endBy parseExpr spaces
                      last <- char '.' >> spaces >> parseExpr
-                     return $ LDottetList init last
+                     return $ LDottedList init last
 
 parseNumber''' = liftM (LNumber . read) $ many1 digit
 
@@ -112,7 +112,7 @@ parseExpr = parseAtom
 showVal :: LispVal -> String
 showVal (LAtom name)            = name
 showVal (LList items)           = "(" ++ unwordsList items ++ ")"
-showVal (LDottetList init last) = "(" 
+showVal (LDottedList init last) = "(" 
                                   ++ unwordsList init 
                                   ++ " . " 
                                   ++ showVal last 
@@ -128,12 +128,19 @@ unwordsList = unwords . map showVal
 -- Evaluation
 
 eval :: LispVal -> ThrowsError LispVal
-eval val@(LString _)              = return val
-eval val@(LNumber _)              = return val
-eval val@(LBool _)                = return val
-eval (LList [LAtom "quote", val]) = return val
-eval (LList (LAtom func : args))  = mapM eval args >>= apply func
-eval badForm                      = throwError $ UnrecognizedSpecialForm badForm
+eval val@(LString _)                  = return val
+eval val@(LNumber _)                  = return val
+eval val@(LBool _)                    = return val
+eval (LList [LAtom "quote", val])     = return val
+eval (LList [LAtom "if", cond, t, e]) = do result <- eval cond
+                                           case result of
+                                             LBool True  -> eval t
+                                             LBool False -> eval e
+                                             x -> throwError $ 
+                                                  TypeMismatch "boolean" x
+eval (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
+eval (LList (LAtom func : args))      = mapM eval args >>= apply func
+eval badForm                          = throwError $ UnrecognizedSpecialForm badForm
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
 apply func args = maybe (throwError $ UnknownFunction func) 
@@ -141,40 +148,87 @@ apply func args = maybe (throwError $ UnknownFunction func)
                         (lookup func primitives)
 
 primitives ::[(String, [LispVal] -> ThrowsError LispVal)]
-primitives = [("+",         numericBinop (+)),
-              ("-",         numericBinop (-)),
-              ("*",         numericBinop (*)),
-              ("/",         numericBinop div),
-              ("mod",       numericBinop mod),
-              ("quotient",  numericBinop quot),
-              ("remainder", numericBinop rem),
-              -- Exercise 3.1
-              ("boolean?", unaryOp booleanp),
-              ("symbol?",  unaryOp symbolp),
-              ("string?",  unaryOp stringp),
-              ("number?",  unaryOp numberp),
-              -- Exercise 3.3
-              ("string->symbol", unaryOp string2symbol),
-              ("symbol->string", unaryOp symbol2string)
+primitives = [("+",         numericBinop (+))
+             ,("-",         numericBinop (-))
+             ,("*",         numericBinop (*))
+             ,("/",         numericBinop div)
+             ,("mod",       numericBinop mod)
+             ,("quotient",  numericBinop quot)
+             ,("remainder", numericBinop rem)
+             -- Exercise 3.1
+             ,("boolean?", unaryOp booleanp)
+             ,("symbol?",  unaryOp symbolp)
+             ,("string?",  unaryOp stringp)
+             ,("number?",  unaryOp numberp)
+             -- Exercise 3.3
+             ,("string->symbol", unaryOp string2symbol)
+             ,("symbol->string", unaryOp symbol2string)
+             ,("=",  numBoolBinOp (==))
+             ,("<",  numBoolBinOp (<))
+             ,(">",  numBoolBinOp (>))
+             ,("/=", numBoolBinOp (/=))
+             ,("<=", numBoolBinOp (<=))
+             ,(">=", numBoolBinOp (>=))
+             ,("&&", boolBoolBinOp (&&))
+             ,("||", boolBoolBinOp (||))
+             ,("string=?",  strBoolBinOp (==))
+             ,("string<?",  strBoolBinOp (<))
+             ,("string>?",  strBoolBinOp (>))
+             -- TODO: Why no "string/=?"?
+             ,("string<=?", strBoolBinOp (<=))
+             ,("string>=?", strBoolBinOp (>=))
+
+             ,("car",    car)
+             ,("cdr",    cdr)
+             ,("cons",   cons)
+             ,("eq?",    eqvp)
+             ,("eqv?",   eqvp)
              ]
 
+-- TODO: "equal?"
+-- TODO: Exercises 4.*
+
+-- Helpers for creating primitves.
 numericBinop :: (Integer -> Integer -> Integer) 
-             -> [LispVal] 
-             -> ThrowsError LispVal
+             -> [LispVal] -> ThrowsError LispVal
 numericBinop op args = if length args < 2
                        then throwError $ NumArgs 2 args
                        else mapM unpackNum args >>= return . LNumber . foldl1 op
 
+unaryOp :: (LispVal -> ThrowsError LispVal)
+        -> [LispVal] -> ThrowsError LispVal
+unaryOp op [arg] = op arg
+unaryOp _ args = throwError $ NumArgs 1 args
+
+boolBinOp :: (LispVal -> ThrowsError a)
+          -> (a -> a -> Bool)
+          -> [LispVal] -> ThrowsError LispVal
+boolBinOp unpacker op args = if length args < 2
+                             then throwError $ NumArgs 2 args
+                             else do unpacked <- mapM unpacker args
+                                     return $ LBool $ pairwiseTrue op unpacked
+
+pairwiseTrue :: (a -> a -> Bool) -> [a] -> Bool
+pairwiseTrue op args = and $ zipWith op args (tail args)
+
+numBoolBinOp  = boolBinOp unpackNum
+boolBoolBinOp = boolBinOp unpackBool
+strBoolBinOp  = boolBinOp unpackStr
+
+-- Helpers for unpacking.
 unpackNum :: LispVal -> ThrowsError Integer
 unpackNum (LNumber n) = return n
 unpackNum x           = throwError $ TypeMismatch "number" x
 
-unaryOp :: (LispVal -> ThrowsError LispVal)
-        -> [LispVal]
-        -> ThrowsError LispVal
-unaryOp op [arg] = op arg
-unaryOp _ args = throwError $ NumArgs 1 args
+unpackBool :: LispVal -> ThrowsError Bool
+unpackBool (LBool b) = return b
+unpackBool x         = throwError $ TypeMismatch "boolean" x
 
+unpackStr :: LispVal -> ThrowsError String
+unpackStr (LString s) = return s
+unpackStr x           = throwError $ TypeMismatch "string" x
+
+-- Implementations.
 booleanp (LBool _) = return $ LBool True
 booleanp _         = return $ LBool False
 
@@ -192,6 +246,39 @@ string2symbol x             = throwError $ TypeMismatch "string" x
 
 symbol2string (LAtom val) = return $ LString val
 symbol2string x           = throwError $ TypeMismatch "symbol" x
+
+car [LList (x:xs)] = return x
+car [LDottedList (x:xs) _] = return x
+-- Next case also handles (car '())
+car [badArg] = throwError $ TypeMismatch "pair" badArg -- TODO: Why not "list"?
+car badArgs = throwError $ NumArgs 1 badArgs
+
+cdr [LList (x:xs)] = return $ LList xs
+cdr [LDottedList [x]    y] = return y
+cdr [LDottedList (_:xs) y] = return $ LDottedList xs y
+-- Next case also handles (cdr '())
+cdr [badArg] = throwError $ TypeMismatch "pair" badArg -- TODO: Why not "list"?
+cdr badArgs = throwError $ NumArgs 1 badArgs
+
+cons [x, LList []] = return $ LList [x]
+cons [x, LList ys] = return $ LList (x:ys)
+cons [x, LDottedList ys lasty] = return $ LDottedList (x:ys) lasty
+cons [x, y] = return $ LDottedList [x] y
+cons badArgs = throwError $ NumArgs 2 badArgs
+
+eqvp [x, y] = return $ LBool $ eqvPair x y
+eqvp badArgs = throwError $ NumArgs 2 badArgs
+
+eqvPair (LBool x)   (LBool y)   = x == y
+eqvPair (LNumber x) (LNumber y) = x == y
+eqvPair (LString x) (LString y) = x == y
+eqvPair (LAtom x)   (LAtom y)   = x == y
+eqvPair (LList xs)  (LList ys)  = (length xs == length ys) &&
+                                  (and $ zipWith eqvPair xs ys)
+eqvPair (LDottedList xs lastx) (LDottedList ys lasty) = eqvPair 
+                                                       (LList $ xs ++ [lastx])
+                                                       (LList $ ys ++ [lasty])
+eqvPair _ _ = False
 
 -- Exception handling.
 
@@ -239,8 +326,6 @@ main = do args <- getArgs
             Left err  -> print err
             Right val -> print val
 
-readExpr :: String -> ThrowsError LispVal
 readExpr input = case parse parseExpr "lisp" input of
                    Left  err -> throwError $ Parser err
                    Right val -> return val
-
