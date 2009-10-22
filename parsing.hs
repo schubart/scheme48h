@@ -4,6 +4,7 @@ import Monad
 import System.Environment
 import Numeric
 import Data.Char
+import Control.Monad.Error
 
 symbol :: Parser Char
 symbol = oneOf "!$%&|*+-/:<=>?@^_~"
@@ -108,12 +109,6 @@ parseExpr = parseAtom
 
 -- TODO: Exercises 2.*
 
--- "lisp" only seems to be used for error messages.
-readExpr :: String -> LispVal
-readExpr input = case parse parseExpr "lisp" input of
-                   Left  err -> LString $ "No match: " ++ show err
-                   Right val -> val
-
 showVal :: LispVal -> String
 showVal (LAtom name)            = name
 showVal (LList items)           = "(" ++ unwordsList items ++ ")"
@@ -132,19 +127,20 @@ unwordsList = unwords . map showVal
 
 -- Evaluation
 
-eval :: LispVal -> LispVal
-eval val@(LString _)              = val
-eval val@(LNumber _)              = val
-eval val@(LBool _)                = val
-eval (LList [LAtom "quote", val]) = val
-eval (LList (LAtom func : args))  = apply func $ map eval args
+eval :: LispVal -> ThrowsError LispVal
+eval val@(LString _)              = return val
+eval val@(LNumber _)              = return val
+eval val@(LBool _)                = return val
+eval (LList [LAtom "quote", val]) = return val
+eval (LList (LAtom func : args))  = mapM eval args >>= apply func
+eval badForm                      = throwError $ UnrecognizedSpecialForm badForm
 
-err object message = error $ (show object) ++ ": " ++ message
+apply :: String -> [LispVal] -> ThrowsError LispVal
+apply func args = maybe (throwError $ UnknownFunction func) 
+                        ($ args)
+                        (lookup func primitives)
 
-apply :: String -> [LispVal] -> LispVal
-apply func args = maybe (err func "Not defined") ($ args) $ lookup func primitives
-
-primitives ::[(String, [LispVal] -> LispVal)]
+primitives ::[(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [("+",         numericBinop (+)),
               ("-",         numericBinop (-)),
               ("*",         numericBinop (*)),
@@ -153,44 +149,98 @@ primitives = [("+",         numericBinop (+)),
               ("quotient",  numericBinop quot),
               ("remainder", numericBinop rem),
               -- Exercise 3.1
-              ("boolean?", booleanp),
-              ("symbol?",  symbolp),
-              ("string?",  stringp),
-              ("number?",  numberp),
+              ("boolean?", unaryOp booleanp),
+              ("symbol?",  unaryOp symbolp),
+              ("string?",  unaryOp stringp),
+              ("number?",  unaryOp numberp),
               -- Exercise 3.3
-              ("string->symbol", string2symbol),
-              ("symbol->string", symbol2string)
+              ("string->symbol", unaryOp string2symbol),
+              ("symbol->string", unaryOp symbol2string)
              ]
 
-numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
-numericBinop op args = LNumber $ foldl1 op $ map unpackNum args
+numericBinop :: (Integer -> Integer -> Integer) 
+             -> [LispVal] 
+             -> ThrowsError LispVal
+numericBinop op args = if length args < 2
+                       then throwError $ NumArgs 2 args
+                       else mapM unpackNum args >>= return . LNumber . foldl1 op
 
-unpackNum :: LispVal -> Integer
-unpackNum (LNumber n) = n
-{- Exercise 3.2
-unpackNum (LString n) = let parsed = reads n in
-                        if null parsed
-                        then 0
-                        else fst $ head $ parsed
-unpackNum (LList [n]) = unpackNum n
--}
-unpackNum x           = err x "Not a number"
+unpackNum :: LispVal -> ThrowsError Integer
+unpackNum (LNumber n) = return n
+unpackNum x           = throwError $ TypeMismatch "number" x
 
--- Exercise solutions throw exception (non-exhaustive pattern) when calling
--- these unary functions with multiple args. This here returns false.
-booleanp [(LBool _)] = LBool True
-booleanp _           = LBool False
-symbolp [(LAtom _)] = LBool True
-symbolp _           = LBool False
-stringp [(LString _)] = LBool True
-stringp _             = LBool False
-numberp [(LNumber _)] = LBool True
-numberp _             = LBool False
-string2symbol [(LString val)] = LAtom val
-string2symbol x = err x "Not a string"
-symbol2string [(LAtom val)] = LString val
-symbol2string x = err x "Not a symbol"
+unaryOp :: (LispVal -> ThrowsError LispVal)
+        -> [LispVal]
+        -> ThrowsError LispVal
+unaryOp op [arg] = op arg
+unaryOp _ args = throwError $ NumArgs 1 args
 
+booleanp (LBool _) = return $ LBool True
+booleanp _         = return $ LBool False
+
+symbolp (LAtom _) = return $ LBool True
+symbolp _         = return $ LBool False
+
+stringp (LString _) = return $ LBool True
+stringp _           = return $ LBool False
+
+numberp (LNumber _) = return $ LBool True
+numberp _           = return $ LBool False
+
+string2symbol (LString val) = return $ LAtom val
+string2symbol x             = throwError $ TypeMismatch "string" x
+
+symbol2string (LAtom val) = return $ LString val
+symbol2string x           = throwError $ TypeMismatch "symbol" x
+
+-- Exception handling.
+
+-- Error types.
+data LispError = Parser ParseError
+               | UnrecognizedSpecialForm LispVal
+               | UnknownFunction String
+               | NumArgs Int [LispVal]
+               | TypeMismatch String LispVal
+               | Default String
+
+-- Make it an Haskell error.
+-- TODO: What's noMsg and strMsg about?
+instance Error LispError where
+    noMsg = Default "An error has occurred"
+    strMsg = Default
+
+type ThrowsError = Either LispError
+
+-- Error messages.
+instance Show LispError where
+    show (Parser err) 
+        = ("Parse error: " ++ show err)
+
+    show (UnrecognizedSpecialForm form)
+        = ("Unrecognized special form: " ++ show form)
+
+    show (UnknownFunction name)
+        = (name ++ ": Unknown function")
+
+    show (NumArgs expected actual) 
+        = ("Expected " ++ show expected ++ " arguments, " ++
+           "got " ++ (show $ length actual) ++ 
+           ": " ++ unwordsList actual)
+
+    show (TypeMismatch expected actual)
+        = ("Expected " ++ expected ++ ", " ++
+           "got " ++ show actual)
+    -- TODO: Why no definition for Default?
 
 main :: IO ()
-main = do getArgs >>= putStrLn . show . eval . readExpr . head
+main = do args <- getArgs
+          let evaluated = (readExpr $ head args) >>= eval
+          case evaluated of
+            Left err  -> print err
+            Right val -> print val
+
+readExpr :: String -> ThrowsError LispVal
+readExpr input = case parse parseExpr "lisp" input of
+                   Left  err -> throwError $ Parser err
+                   Right val -> return val
+
