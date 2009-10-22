@@ -1,4 +1,5 @@
 module Main where
+import IO hiding (try)
 import Text.ParserCombinators.Parsec hiding (spaces)
 import Monad
 import System.Environment
@@ -320,11 +321,15 @@ instance Show LispError where
     -- TODO: Why no definition for Default?
 
 main :: IO ()
-main = do args <- getArgs
-          let evaluated = (readExpr $ head args) >>= eval
-          case evaluated of
-            Left err  -> print err
-            Right val -> print val
+main = do putStr "Lisp > "
+          hFlush stdout
+          line <- getLine
+          case line of
+            "quit" -> return ()
+            otherwise -> do case (readExpr line) >>= eval of
+                              Left err  -> print err
+                              Right val -> print val
+                            main
 
 readExpr input = case parse parseExpr "lisp" input of
                    Left  err -> throwError $ Parser err
