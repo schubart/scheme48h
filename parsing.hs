@@ -129,20 +129,21 @@ unwordsList = unwords . map showVal
 
 -- Evaluation
 
-eval :: LispVal -> IOThrowsError LispVal
-eval val@(LString _)                  = return val
-eval val@(LNumber _)                  = return val
-eval val@(LBool _)                    = return val
-eval (LList [LAtom "quote", val])     = return val
-eval (LList [LAtom "if", cond, t, e]) = do result <- eval cond
-                                           case result of
-                                             LBool True  -> eval t
-                                             LBool False -> eval e
-                                             x -> throwError $ 
-                                                  TypeMismatch "boolean" x
-eval (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
-eval (LList (LAtom func : args))      = mapM eval args >>= liftThrows . apply func
-eval badForm                          = throwError $ UnrecognizedSpecialForm badForm
+eval :: Env -> LispVal -> IOThrowsError LispVal
+eval _   val@(LString _)                  = return val
+eval _   val@(LNumber _)                  = return val
+eval _   val@(LBool _)                    = return val
+eval _   (LList [LAtom "quote", val])     = return val
+eval env (LList [LAtom "if", cond, t, e]) = do result <- eval env cond
+                                               case result of
+                                                 LBool True  -> eval env t
+                                                 LBool False -> eval env e
+                                                 x -> throwError $ 
+                                                      TypeMismatch "boolean" x
+eval _   (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
+eval env (LList (LAtom func : args))      = mapM (eval env) args >>= 
+                                            liftThrows . apply func
+eval _   badForm                          = throwError $ UnrecognizedSpecialForm badForm
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
 apply func args = maybe (throwError $ UnknownFunction func) 
@@ -332,16 +333,19 @@ liftThrows (Left err)  = throwError err
 liftThrows (Right val) = return val
 
 main :: IO ()
-main = do putStr "Lisp > "
-          hFlush stdout
-          line <- getLine
-          case line of
-            "quit" -> return ()
-            otherwise -> do result <- runErrorT $ (readExpr line) >>= eval
-                            case result of
-                              Left err  -> print err
-                              Right val -> print val
-                            main
+main = newIORef [] >>= repl
+
+repl :: Env -> IO ()
+repl env = do putStr "Lisp > "
+              hFlush stdout
+              line <- getLine
+              case line of
+                "quit" -> return ()
+                otherwise -> do result <- runErrorT $ (readExpr line) >>= eval env
+                                case result of
+                                  Left err  -> print err
+                                  Right val -> print val
+                                repl env
 
 readExpr input = case parse parseExpr "lisp" input of
                    Left  err -> throwError $ Parser err
