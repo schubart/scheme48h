@@ -21,6 +21,11 @@ data LispVal = LAtom String
              | LNumber Integer
              | LString String
              | LBool Bool
+             | PrimitiveFunc ([LispVal] -> IOThrowsError LispVal)
+             | Func { params :: [String]
+                    , vararg :: (Maybe String)
+                    , body   :: LispVal
+                    , closure :: Env }
 instance Show LispVal where show = showVal
 
 parseAtom = do first <- symbol <|> letter
@@ -123,17 +128,24 @@ showVal (LNumber value)         = show value
 showVal (LString value)         = "\"" ++ value ++ "\""
 showVal (LBool True)            = "#t"
 showVal (LBool False)           = "#f"
-
+showVal (PrimitiveFunc _)       = "<primitive>"
+showVal (Func { params = params
+              , vararg = vararg}) = ("(lambda (" 
+                                     ++ unwords params 
+                                     ++ case vararg of
+                                          Nothing -> ""
+                                          Just arg -> " ." ++ arg
+                                     ++ ") ...)")
 unwordsList :: [LispVal] -> String
 unwordsList = unwords . map showVal
 
 -- Evaluation
 
 eval :: Env -> LispVal -> IOThrowsError LispVal
-eval _   val@(LString _)                  = return val
-eval _   val@(LNumber _)                  = return val
-eval _   val@(LBool _)                    = return val
-eval env (LAtom id)                       = getVar env id
+eval _   val@(LString _) = return val
+eval _   val@(LNumber _) = return val
+eval _   val@(LBool _) = return val
+eval env (LAtom id) = getVar env id
 eval _   (LList [LAtom "quote", val])     = return val
 eval env (LList [LAtom "if", cond, t, e]) = do result <- eval env cond
                                                case result of
@@ -146,9 +158,8 @@ eval env (LList [LAtom "set!", LAtom var, expr]) = eval env expr >>= setVar env 
 eval _   (LList (LAtom "set!" : x))              = throwError $ NumArgs 2 x
 eval env (LList [LAtom "define", LAtom var, expr]) = eval env expr >>= defineVar env var
 eval _   (LList (LAtom "define" : x))              = throwError $ NumArgs 2 x
-eval env (LList (LAtom func : args))      = mapM (eval env) args >>= 
-                                            liftThrows . apply func
-eval _   badForm                          = throwError $ UnrecognizedSpecialForm badForm
+eval env (LList (LAtom func : args)) = mapM (eval env) args >>= liftThrows . apply func
+eval _   badForm  = throwError $ UnrecognizedSpecialForm badForm
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
 apply func args = maybe (throwError $ UnknownFunction func) 
@@ -371,6 +382,12 @@ defineVar envRef var val = do
        env <- readIORef envRef
        writeIORef envRef ((var, valRef) : env)
        return val
+
+bindVars :: Env -> [(String, LispVal)] -> IO Env
+bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
+    where extendEnv bindings env = liftM (++ env) (mapM addBinding bindings)
+          addBinding (var, value) = do ref <- newIORef value
+                                       return (var, ref)
 
 main :: IO ()
 main = newIORef [] >>= repl
