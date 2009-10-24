@@ -133,6 +133,7 @@ eval :: Env -> LispVal -> IOThrowsError LispVal
 eval _   val@(LString _)                  = return val
 eval _   val@(LNumber _)                  = return val
 eval _   val@(LBool _)                    = return val
+eval env (LAtom id)                       = getVar env id
 eval _   (LList [LAtom "quote", val])     = return val
 eval env (LList [LAtom "if", cond, t, e]) = do result <- eval env cond
                                                case result of
@@ -141,6 +142,10 @@ eval env (LList [LAtom "if", cond, t, e]) = do result <- eval env cond
                                                  x -> throwError $ 
                                                       TypeMismatch "boolean" x
 eval _   (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
+eval env (LList [LAtom "set!", LAtom var, expr]) = eval env expr >>= setVar env var
+eval _   (LList (LAtom "set!" : x))              = throwError $ NumArgs 2 x
+eval env (LList [LAtom "define", LAtom var, expr]) = eval env expr >>= defineVar env var
+eval _   (LList (LAtom "define" : x))              = throwError $ NumArgs 2 x
 eval env (LList (LAtom func : args))      = mapM (eval env) args >>= 
                                             liftThrows . apply func
 eval _   badForm                          = throwError $ UnrecognizedSpecialForm badForm
@@ -291,6 +296,7 @@ data LispError = Parser ParseError
                | UnknownFunction String
                | NumArgs Int [LispVal]
                | TypeMismatch String LispVal
+               | UnboundVar String
                | Default String
 
 -- Make it an Haskell error.
@@ -320,6 +326,9 @@ instance Show LispError where
     show (TypeMismatch expected actual)
         = ("Expected " ++ expected ++ ", " ++
            "got " ++ show actual)
+
+    show (UnboundVar var)
+        = (var ++ ": Unbound variable")
     -- TODO: Why no definition for Default?
 
 -- State
@@ -331,6 +340,37 @@ type IOThrowsError = ErrorT LispError IO
 liftThrows :: ThrowsError a -> IOThrowsError a
 liftThrows (Left err)  = throwError err
 liftThrows (Right val) = return val
+
+isBound :: Env -> String -> IO Bool
+isBound envRef var = do env <- readIORef envRef
+                        return $ maybe False
+                                       (const True)
+                                       (lookup var env)
+
+getVar :: Env -> String -> IOThrowsError LispVal
+getVar envRef var = do env <- liftIO $ readIORef envRef
+                       maybe (throwError $ UnboundVar var)
+                             (liftIO . readIORef)
+                             (lookup var env)
+
+setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+setVar envRef var val = do env <- liftIO $ readIORef envRef
+                           maybe (throwError $ UnboundVar var)
+                                 (liftIO . (flip writeIORef val))
+                                 (lookup var env)
+                           return val
+
+defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+defineVar envRef var val = do
+  defined <- liftIO $ isBound envRef var
+  if defined
+     then do setVar envRef var val
+             return val
+     else liftIO $ do
+       valRef <- newIORef val
+       env <- readIORef envRef
+       writeIORef envRef ((var, valRef) : env)
+       return val
 
 main :: IO ()
 main = newIORef [] >>= repl
