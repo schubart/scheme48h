@@ -21,10 +21,10 @@ data LispVal = LAtom String
              | LNumber Integer
              | LString String
              | LBool Bool
-             | PrimitiveFunc ([LispVal] -> IOThrowsError LispVal)
-             | Func { params :: [String]
-                    , vararg :: (Maybe String)
-                    , body   :: LispVal
+             | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
+             | Func { params  :: [String]
+                    , vararg  :: (Maybe String)
+                    , body    :: LispVal
                     , closure :: Env }
 instance Show LispVal where show = showVal
 
@@ -158,13 +158,13 @@ eval env (LList [LAtom "set!", LAtom var, expr]) = eval env expr >>= setVar env 
 eval _   (LList (LAtom "set!" : x))              = throwError $ NumArgs 2 x
 eval env (LList [LAtom "define", LAtom var, expr]) = eval env expr >>= defineVar env var
 eval _   (LList (LAtom "define" : x))              = throwError $ NumArgs 2 x
-eval env (LList (LAtom func : args)) = mapM (eval env) args >>= liftThrows . apply func
+eval env (LList (function : args)) = do func <- eval env function
+                                        argVals <- mapM (eval env) args
+                                        apply func argVals
 eval _   badForm  = throwError $ UnrecognizedSpecialForm badForm
 
-apply :: String -> [LispVal] -> ThrowsError LispVal
-apply func args = maybe (throwError $ UnknownFunction func) 
-                        ($ args)
-                        (lookup func primitives)
+apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
+apply (PrimitiveFunc func) args = liftThrows $ func args
 
 primitives ::[(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [("+",         numericBinop (+))
@@ -390,7 +390,10 @@ bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
                                        return (var, ref)
 
 main :: IO ()
-main = newIORef [] >>= repl
+main = newIORef [] 
+       >>= (flip bindVars $ map makePrimitiveFunc primitives)
+       >>= repl
+    where makePrimitiveFunc (name, func) = (name, PrimitiveFunc func)
 
 repl :: Env -> IO ()
 repl env = do putStr "Lisp > "
