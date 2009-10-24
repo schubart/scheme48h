@@ -21,11 +21,13 @@ data LispVal = LAtom String
              | LNumber Integer
              | LString String
              | LBool Bool
-             | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
+             | PrimitiveFunc ([LispVal] ->   ThrowsError LispVal)
+             | IOFunc        ([LispVal] -> IOThrowsError LispVal)
              | Func { params  :: [String]
                     , vararg  :: (Maybe String)
                     , body    :: [LispVal]
                     , closure :: Env }
+             | Port Handle
 instance Show LispVal where show = showVal
 
 parseAtom = do first <- symbol <|> letter
@@ -136,6 +138,9 @@ showVal (Func { params = params
                                           Nothing -> ""
                                           Just arg -> " ." ++ arg
                                      ++ ") ...)")
+showVal (IOFunc _) = "<IO primitive>"
+showVal (Port _) = "<IO handle>"
+
 unwordsList :: [LispVal] -> String
 unwordsList = unwords . map showVal
 
@@ -170,6 +175,7 @@ makeFunc env params body = return $ Func (map showVal params) Nothing body env
 
 apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
 apply (PrimitiveFunc func) args         = liftThrows $ func args
+apply (IOFunc func) args                = func args
 apply (Func params _ body closure) args = 
     if length args /= length params
        then throwError $ NumArgs (length params) args
@@ -313,6 +319,13 @@ eqvPair (LDottedList xs lastx) (LDottedList ys lasty) = eqvPair
                                                        (LList $ ys ++ [lasty])
 eqvPair _ _ = False
 
+ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
+ioPrimitives = [("write", writeProc)]
+
+writeProc [obj] = writeProc [obj, Port stdout]
+writeProc [obj, Port handle] = do liftIO $ hPrint handle obj
+                                  return $ LBool True
+
 -- Exception handling.
 
 -- Error types.
@@ -405,9 +418,10 @@ bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
 
 main :: IO ()
 main = newIORef [] 
-       >>= (flip bindVars $ map makePrimitiveFunc primitives)
+       >>= (flip bindVars (map (makeFunc PrimitiveFunc) primitives ++
+                           map (makeFunc IOFunc)        ioPrimitives))
        >>= repl
-    where makePrimitiveFunc (name, func) = (name, PrimitiveFunc func)
+    where makeFunc ctor (name, func) = (name, ctor func)
 
 repl :: Env -> IO ()
 repl env = do putStr "Lisp > "
