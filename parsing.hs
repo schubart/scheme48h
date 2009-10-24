@@ -24,7 +24,7 @@ data LispVal = LAtom String
              | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
              | Func { params  :: [String]
                     , vararg  :: (Maybe String)
-                    , body    :: LispVal
+                    , body    :: [LispVal]
                     , closure :: Env }
 instance Show LispVal where show = showVal
 
@@ -157,14 +157,28 @@ eval _   (LList (LAtom "if" : x))         = throwError $ NumArgs 3 x
 eval env (LList [LAtom "set!", LAtom var, expr]) = eval env expr >>= setVar env var
 eval _   (LList (LAtom "set!" : x))              = throwError $ NumArgs 2 x
 eval env (LList [LAtom "define", LAtom var, expr]) = eval env expr >>= defineVar env var
-eval _   (LList (LAtom "define" : x))              = throwError $ NumArgs 2 x
+eval env (LList (LAtom "define" : LList (LAtom name : params) : body)) = 
+    makeFunc env params body >>= defineVar env name
+eval env (LList (LAtom "lambda" : LList params : body)) = makeFunc env params body
 eval env (LList (function : args)) = do func <- eval env function
                                         argVals <- mapM (eval env) args
                                         apply func argVals
 eval _   badForm  = throwError $ UnrecognizedSpecialForm badForm
 
+-- TODO what if params are not strings or symbols?
+makeFunc env params body = return $ Func (map showVal params) Nothing body env
+
 apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
-apply (PrimitiveFunc func) args = liftThrows $ func args
+apply (PrimitiveFunc func) args         = liftThrows $ func args
+apply (Func params _ body closure) args = 
+    if length args /= length params
+       then throwError $ NumArgs (length params) args
+       else (liftIO $ bindVars closure $ zip params args) >>= evalBody
+    -- TODO varargs
+    where
+      -- Eval each statement, keep result of last one.
+      -- TODO: crashes if body empty.
+      evalBody env = liftM last $ mapM (eval env) body
 
 primitives ::[(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [("+",         numericBinop (+))
