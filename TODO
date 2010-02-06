@@ -1,0 +1,6 @@
+[ ] install some other scheme as reference
+[ ] parse multiple statements
+[ ] take file name as arg
+[X] break into smaller files
+[ ] && and || need to be special forms?
+[ ] create unit tests
